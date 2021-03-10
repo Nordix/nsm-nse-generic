@@ -21,6 +21,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"time"
 
@@ -50,6 +51,8 @@ import (
 	registrychain "github.com/networkservicemesh/sdk/pkg/registry/core/chain"
 	"github.com/networkservicemesh/sdk/pkg/tools/grpcutils"
 	"github.com/networkservicemesh/sdk/pkg/tools/spiffejwt"
+	meridioipam "github.com/nordix/meridio/pkg/ipam"
+	"github.com/vishvananda/netlink"
 )
 
 // Config holds configuration parameters from environment variables
@@ -192,18 +195,48 @@ type simpleIpam struct {
 	ipv6Prefix  string
 	point2Point bool
 	myIP        string
+	bits        int
+	ones        int
 }
 
 func newSimpleIpam(config *Config) *simpleIpam {
-	ipam, err := ipam.New(config.CidrPrefix)
+	_, net, err := net.ParseCIDR(config.CidrPrefix)
 	if err != nil {
-		logrus.Fatalf("Could not create ipam for %s; %+v", config.CidrPrefix, err)
+		logrus.Fatalf("Could not parse cidr %s; %+v", config.CidrPrefix, err)
 	}
-	return &simpleIpam{
-		ipam:        ipam,
+	sipam := &simpleIpam{
 		ipv6Prefix:  config.Ipv6Prefix,
 		point2Point: config.Point2Point,
 	}
+	sipam.ones, sipam.bits = net.Mask.Size()
+	
+	if config.MeridioIpam != "" {
+		// Request a CIDR from the meridio ipam service.
+		// We require a mask <= 16 for the configured CIDR and request a /24 IPv4 cidr.
+		if sipam.bits != 32 || sipam.ones > 16 {
+			logrus.Fatalf("MeridioIpam requies IPv4 with mask <= 16: %s", config.CidrPrefix)
+		}
+        ipamClient, err := meridioipam.NewIpamClient(config.MeridioIpam)
+        if err != nil {
+			logrus.Fatalf("Error creating New Ipam Client: %+v", err)
+        }
+		subnetPool, err := netlink.ParseAddr(config.CidrPrefix)
+        proxySubnet, err := ipamClient.AllocateSubnet(subnetPool, 24)
+        if err != nil {
+			logrus.Fatalf("Error AllocateSubnet: %+v", err)
+        }
+		logrus.Infof("Using MeridioIpam cidr; %s", proxySubnet.String())
+		sipam.ipam, err = ipam.New(proxySubnet.String())
+		if err != nil {
+			logrus.Fatalf("Could not create ipam for %s; %+v", config.CidrPrefix, err)
+		}
+	} else {
+		sipam.ipam, err = ipam.New(config.CidrPrefix)
+		if err != nil {
+			logrus.Fatalf("Could not create ipam for %s; %+v", config.CidrPrefix, err)
+		}
+	}
+	return sipam
 }
 
 func (s *simpleIpam) Request(
@@ -221,8 +254,7 @@ func (s *simpleIpam) Request(
 
 	if s.point2Point {
 		// Compute the mask "/32" or "/128"
-		_, bits := s.ipam.CIDR.Mask.Size()
-		mask := fmt.Sprintf("/%d", bits)
+		mask := fmt.Sprintf("/%d", s.bits)
 
 		if addr, err := s.ipam.Allocate(); err != nil {
 			return nil, err
@@ -251,8 +283,7 @@ func (s *simpleIpam) Request(
 	// Not point-to-point connection
 
 	// Compute the mask. Same as the ipam.CIDR
-	ones, _ := s.ipam.CIDR.Mask.Size()
-	mask := fmt.Sprintf("/%d", ones)
+	mask := fmt.Sprintf("/%d", s.ones)
 
 	// The NSE has only one interface hence only one address
 	if s.myIP == "" {
