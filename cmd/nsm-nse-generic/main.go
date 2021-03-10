@@ -20,22 +20,18 @@ package main
 
 import (
 	"context"
-	"io/ioutil"
-	"net/url"
-	"os"
 	"fmt"
-	"path/filepath"
+	"net/url"
 	"time"
 
 	"github.com/edwarnicke/grpcfd"
+	"github.com/golang/protobuf/ptypes/empty"
 	"github.com/kelseyhightower/envconfig"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"github.com/golang/protobuf/ptypes/empty"
 
 	"github.com/Nordix/simple-ipam/pkg/ipam"
 	"github.com/networkservicemesh/api/pkg/api/networkservice"
@@ -48,12 +44,12 @@ import (
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/kernel"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/recvfd"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/sendfd"
+	"github.com/networkservicemesh/sdk/pkg/networkservice/core/next"
 	registryrefresh "github.com/networkservicemesh/sdk/pkg/registry/common/refresh"
 	registrysendfd "github.com/networkservicemesh/sdk/pkg/registry/common/sendfd"
 	registrychain "github.com/networkservicemesh/sdk/pkg/registry/core/chain"
 	"github.com/networkservicemesh/sdk/pkg/tools/grpcutils"
 	"github.com/networkservicemesh/sdk/pkg/tools/spiffejwt"
-	"github.com/networkservicemesh/sdk/pkg/networkservice/core/next"
 )
 
 // Config holds configuration parameters from environment variables
@@ -63,81 +59,49 @@ type Config struct {
 	MaxTokenLifetime time.Duration     `default:"24h" desc:"maximum lifetime of tokens" split_words:"true"`
 	ServiceName      string            `default:"nse-generic" desc:"Name of providing service" split_words:"true"`
 	Labels           map[string]string `default:"" desc:"Endpoint labels"`
-	CidrPrefix       string          `default:"169.254.0.0/16" desc:"CIDR Prefix to assign IPs from" split_words:"true"`
-	Ipv6Prefix       string          `default:"" desc:"Ipv6 Prefix for dual-stack" split_words:"true"`
-	Point2Point      bool            `default:"True" desc:"Use /32 or /128 addresses" split_words:"true"`
-}
-
-// Process prints and processes env to config
-func (c *Config) Process() error {
-	if err := envconfig.Usage("nse", c); err != nil {
-		return errors.Wrap(err, "cannot show usage of envconfig nse")
-	}
-	if err := envconfig.Process("nse", c); err != nil {
-		return errors.Wrap(err, "cannot process envconfig nse")
-	}
-	return nil
+	CidrPrefix       string            `default:"169.254.0.0/16" desc:"CIDR Prefix to assign IPs from" split_words:"true"`
+	Ipv6Prefix       string            `default:"" desc:"Ipv6 Prefix for dual-stack" split_words:"true"`
+	Point2Point      bool              `default:"True" desc:"Use /32 or /128 addresses" split_words:"false"`
+	MeridioIpam      string            `default:"" desc:"Example: meridio-ipam:7777" split_words:"true"`
 }
 
 func main() {
 	ctx := context.Background()
 	ctx, cancel := context.WithCancel(ctx)
 
-	config := new(Config)
-	if err := config.Process(); err != nil {
-		logrus.Fatal(err.Error())
-	}
-
-	logrus.Infof("Config: %#v", config)
-
-	source, err := workloadapi.NewX509Source(ctx)
-	if err != nil {
-		logrus.Fatalf("error getting x509 source: %+v", err)
-	}
-	svid, err := source.GetX509SVID()
-	if err != nil {
-		logrus.Fatalf("error getting x509 svid: %+v", err)
-	}
-	logrus.Infof("SVID: %q", svid.ID)
-
-	ipam, err := ipam.New(config.CidrPrefix)
-	if err != nil {
-		logrus.Fatalf("Could not create ipam for %s; %+v", config.CidrPrefix, err)
-	}
-
+	config := processConfig()
+	source := getX509Source(ctx)
 
 	responderEndpoint := endpoint.NewServer(
 		ctx,
 		config.Name,
 		authorize.NewServer(),
 		spiffejwt.TokenGeneratorFunc(source, config.MaxTokenLifetime),
-		&simpleIpam{
-			ipam: ipam,
-			ipv6Prefix: config.Ipv6Prefix,
-			point2Point: config.Point2Point,
-		},
+		newSimpleIpam(config),
 		recvfd.NewServer(),
 		mechanisms.NewServer(map[string]networkservice.NetworkServiceServer{
 			kernelmech.MECHANISM: kernel.NewServer(),
 		}),
 		sendfd.NewServer())
 
-	
-	creds := grpc.Creds(
+	serverCreds := grpc.Creds(
 		grpcfd.TransportCredentials(
 			credentials.NewTLS(
 				tlsconfig.MTLSServerConfig(source, source, tlsconfig.AuthorizeAny()),
 			),
 		),
 	)
-	server := grpc.NewServer(creds)
+	clientCreds := grpc.WithTransportCredentials(
+		grpcfd.TransportCredentials(
+			credentials.NewTLS(
+				tlsconfig.MTLSClientConfig(source, source, tlsconfig.AuthorizeAny()),
+			),
+		),
+	)
+
+	server := grpc.NewServer(serverCreds)
 	responderEndpoint.Register(server)
-	tmpDir, err := ioutil.TempDir("", config.Name)
-	if err != nil {
-		logrus.Fatalf("error creating tmpDir %+v", err)
-	}
-	defer func(tmpDir string) { _ = os.Remove(tmpDir) }(tmpDir)
-	listenOn := &(url.URL{Scheme: "unix", Path: filepath.Join(tmpDir, "listen.on")})
+	listenOn := &(url.URL{Scheme: "unix", Path: "/tmp/listen.on"})
 	srvErrCh := grpcutils.ListenAndServe(ctx, listenOn, server)
 	exitOnErr(ctx, cancel, srvErrCh)
 	logrus.Infof("grpc server started")
@@ -146,13 +110,7 @@ func main() {
 		grpcutils.URLToTarget(&config.ConnectTo),
 		grpc.WithBlock(),
 		grpc.WithDefaultCallOptions(grpc.WaitForReady(true)),
-		grpc.WithTransportCredentials(
-			grpcfd.TransportCredentials(
-				credentials.NewTLS(
-					tlsconfig.MTLSClientConfig(source, source, tlsconfig.AuthorizeAny()),
-				),
-			),
-		),
+		clientCreds,
 	)
 	if err != nil {
 		logrus.Fatalf("error establishing grpc connection to registry server %+v", err)
@@ -162,7 +120,6 @@ func main() {
 		Name:    config.ServiceName,
 		Payload: payload.IP,
 	})
-
 	if err != nil {
 		logrus.Fatalf("unable to register ns %+v", err)
 	}
@@ -207,11 +164,46 @@ func exitOnErr(ctx context.Context, cancel context.CancelFunc, errCh <-chan erro
 	}(ctx, errCh)
 }
 
+func getX509Source(ctx context.Context) *workloadapi.X509Source {
+	source, err := workloadapi.NewX509Source(ctx)
+	if err != nil {
+		logrus.Fatalf("error getting x509 source: %+v", err)
+	}
+	svid, err := source.GetX509SVID()
+	if err != nil {
+		logrus.Fatalf("error getting x509 svid: %+v", err)
+	}
+	logrus.Infof("SVID: %q", svid.ID)
+	return source
+}
+
+// Process prints and processes env to config
+func processConfig() *Config {
+	c := new(Config)
+	if err := envconfig.Process("nse", c); err != nil {
+		logrus.Fatalf("cannot process envconfig nse %+v", err)
+	}
+	logrus.Infof("Config: %#v", c)
+	return c
+}
+
 type simpleIpam struct {
-	ipam *ipam.IPAM
-	ipv6Prefix string
+	ipam        *ipam.IPAM
+	ipv6Prefix  string
 	point2Point bool
-	myIP string
+	myIP        string
+}
+
+func newSimpleIpam(config *Config) *simpleIpam {
+	ipam, err := ipam.New(config.CidrPrefix)
+	if err != nil {
+		logrus.Fatalf("Could not create ipam for %s; %+v", config.CidrPrefix, err)
+	}
+	return &simpleIpam{
+		ipam:        ipam,
+		ipv6Prefix:  config.Ipv6Prefix,
+		point2Point: config.Point2Point,
+	}
 }
 
 func (s *simpleIpam) Request(

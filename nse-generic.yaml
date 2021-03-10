@@ -35,7 +35,7 @@ spec:
               value: "icmp-responder"
             - name: NSE_CIDR_PREFIX
               value: "169.254.0.0/24"
-            - name: NSE_POINT2_POINT
+            - name: NSE_POINT2POINT
               value: "True"
           volumeMounts:
             - name: spire-agent-socket
