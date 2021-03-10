@@ -1,3 +1,4 @@
-FROM registry.nordix.org/cloud-native/mserver:latest
+FROM alpine:latest
+RUN apk add jq net-tools iproute2 util-linux
 COPY --chown=0:0 default/ /
-CMD ["/init"]
+CMD ["/bin/nsm-nse-generic"]
