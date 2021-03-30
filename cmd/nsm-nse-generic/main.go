@@ -20,9 +20,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 	"net"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/edwarnicke/grpcfd"
@@ -85,6 +89,7 @@ func main() {
 		mechanisms.NewServer(map[string]networkservice.NetworkServiceServer{
 			kernelmech.MECHANISM: kernel.NewServer(),
 		}),
+		&mechanismClient{},
 		sendfd.NewServer())
 
 	serverCreds := grpc.Creds(
@@ -304,5 +309,141 @@ func (s *simpleIpam) Request(
 }
 func (s *simpleIpam) Close(
 	ctx context.Context, conn *networkservice.Connection) (_ *empty.Empty, err error) {
+	// TODO free addresses here?
 	return next.Server(ctx).Close(ctx, conn)
+}
+
+
+
+
+// ----------------------------------------------------------------------
+
+type mechanismClient struct {
+	mutex sync.Mutex
+}
+
+func (k *mechanismClient) Request(
+	ctx context.Context, request *networkservice.NetworkServiceRequest) (*networkservice.Connection, error) {
+
+	conn, err := next.Server(ctx).Request(ctx, request)
+	if err != nil {
+		return conn, err;
+	}
+
+	k.mutex.Lock()
+	mechanisms, err := mechanismCallout(ctx)
+	k.mutex.Unlock()
+	if err != nil {
+		logrus.Infof("mechanismCallout err %v", err)
+	}
+
+	// We only handle the "name" parameter from one (any) mechanism
+	if len(mechanisms) > 0 {
+		if mechanisms[0].Parameters != nil {
+			if name, ok := mechanisms[0].Parameters["name"]; ok {
+				conn.Mechanism.Parameters["name"] = name
+			}
+		}
+	}
+
+	// This call is just for logging the request
+	err = requestCallout(ctx, &networkservice.NetworkServiceRequest{Connection:conn})
+	if err != nil {
+		logrus.Infof("requestCallout err %v", err)
+	}
+	return conn, err
+}
+
+func (k *mechanismClient) Close(
+	ctx context.Context, conn *networkservice.Connection) (*empty.Empty, error) {
+	k.mutex.Lock()
+	closeCallout(ctx, conn)
+	k.mutex.Unlock()
+	return next.Server(ctx).Close(ctx, conn)
+}
+
+
+
+// ----------------------------------------------------------------------
+// Callout functions
+
+func calloutProgram() string {
+	callout := os.Getenv("CALLOUT")
+	if callout == "" {
+		return "/bin/nse.sh"
+	}
+	return callout
+}
+
+func initCallout() error {
+	logrus.Infof("initCallout")
+	cmd := exec.Command(calloutProgram(), "init")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return err
+	} else {
+		fmt.Println(string(out))
+	}
+	return nil
+}
+
+// Send the Request in json format on stdin to the callout script
+func requestCallout(ctx context.Context, req *networkservice.NetworkServiceRequest) error {
+	logrus.Infof("requestCallout")
+	cmd := exec.Command(calloutProgram(), "request")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(stdin)
+	go func() {
+		defer stdin.Close()
+		_ = enc.Encode(req)
+	}()
+	if out, err := cmd.Output(); err != nil {
+		return err
+	} else {
+		fmt.Println(string(out))
+	}
+	return nil
+}
+
+// Send the Request in json format on stdin to the callout script
+func closeCallout(ctx context.Context, conn *networkservice.Connection) error {
+	logrus.Infof("closeCallout")
+	cmd := exec.Command(calloutProgram(), "close")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(stdin)
+	go func() {
+		defer stdin.Close()
+		_ = enc.Encode(conn)
+	}()
+	if out, err := cmd.Output(); err != nil {
+		return err
+	} else {
+		fmt.Println(string(out))
+	}
+	return nil
+}
+
+// Expect a Mechanism array in json format on stdout from the callout script
+func mechanismCallout(ctx context.Context) ([]*networkservice.Mechanism, error) {
+	logrus.Infof("mechanismCallout")
+	cmd := exec.Command(calloutProgram(), "mechanism")
+	out, err := cmd.Output()
+	if err != nil {
+		logrus.Infof("mechanismCallout err %v", err)
+		return nil, err
+	}
+	fmt.Println(string(out))
+
+	var m []*networkservice.Mechanism
+	err = json.Unmarshal(out, &m)
+	if err != nil {
+		logrus.Infof("mechanismCallout Unmarshal err %v", err)
+		return nil, err
+	}
+	return m, nil
 }
