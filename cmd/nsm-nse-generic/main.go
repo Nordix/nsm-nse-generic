@@ -32,6 +32,7 @@ import (
 	"github.com/edwarnicke/grpcfd"
 	"github.com/golang/protobuf/ptypes/empty"
 	"github.com/kelseyhightower/envconfig"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
@@ -41,8 +42,10 @@ import (
 	"github.com/Nordix/simple-ipam/pkg/ipam"
 	"github.com/networkservicemesh/api/pkg/api/networkservice"
 	kernelmech "github.com/networkservicemesh/api/pkg/api/networkservice/mechanisms/kernel"
+	vlanmech "github.com/networkservicemesh/api/pkg/api/networkservice/mechanisms/vlan"
 	"github.com/networkservicemesh/api/pkg/api/networkservice/payload"
 	registryapi "github.com/networkservicemesh/api/pkg/api/registry"
+	"github.com/networkservicemesh/sdk-kernel/pkg/kernel/networkservice/common/mechanisms/vlan"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/chains/endpoint"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/authorize"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms"
@@ -80,17 +83,18 @@ func main() {
 	source := getX509Source(ctx)
 
 	responderEndpoint := endpoint.NewServer(
-		ctx,
-		config.Name,
-		authorize.NewServer(),
 		spiffejwt.TokenGeneratorFunc(source, config.MaxTokenLifetime),
-		newSimpleIpam(config),
-		recvfd.NewServer(),
-		mechanisms.NewServer(map[string]networkservice.NetworkServiceServer{
-			kernelmech.MECHANISM: kernel.NewServer(),
-		}),
-		&mechanismClient{},
-		sendfd.NewServer())
+		endpoint.WithName(config.Name),
+		endpoint.WithAuthorizeServer(authorize.NewServer()),
+		endpoint.WithAdditionalFunctionality(
+			newSimpleIpam(config),
+			recvfd.NewServer(),
+			mechanisms.NewServer(map[string]networkservice.NetworkServiceServer{
+				kernelmech.MECHANISM: kernel.NewServer(),
+				vlanmech.MECHANISM:   vlan.NewServer(),
+			}),
+			&mechanismClient{},
+			sendfd.NewServer()))
 
 	serverCreds := grpc.Creds(
 		grpcfd.TransportCredentials(
@@ -128,6 +132,7 @@ func main() {
 		Name:    config.ServiceName,
 		Payload: payload.IP,
 	})
+
 	if err != nil {
 		logrus.Fatalf("unable to register ns %+v", err)
 	}
