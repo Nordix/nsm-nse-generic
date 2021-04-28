@@ -22,10 +22,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"os/exec"
 	"net"
 	"net/url"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,6 +75,54 @@ type Config struct {
 	Ipv6Prefix       string            `default:"" desc:"Ipv6 Prefix for dual-stack" split_words:"true"`
 	Point2Point      bool              `default:"True" desc:"Use /32 or /128 addresses" split_words:"false"`
 	MeridioIpam      string            `default:"" desc:"Example: meridio-ipam:7777" split_words:"true"`
+	VlanBase         VlanConfig        `default:"" desc:"Base interface for vlan and vlan ID separated by a single period (.)" split_words:"true"`
+	VlanOneLeg       bool              `default:"False" desc:"Create vlan interface in service client only" split_words:"true"`
+}
+
+type VlanConfig struct {
+	BaseInterfaceName string
+	VlanID            int32
+}
+
+func (v *VlanConfig) UnmarshalBinary(bytes []byte) (err error) {
+	text := string(bytes)
+	split := strings.Split(text, ".")
+	if len(split) == 2 {
+		v.BaseInterfaceName = strings.TrimSpace(split[0])
+		v.VlanID, err = func(s string) (int32, error) {
+			// vlan ID range is 0 to 4,095 stored in 12 bit
+			i, err := strconv.ParseInt(s, 10, 12)
+			if err != nil {
+				return 0, err
+			}
+			return int32(i), nil
+		}(strings.TrimSpace(split[1]))
+		if err != nil {
+			return errors.Errorf("invalid vlanId: %s", text)
+		}
+	}
+	return v.validate()
+}
+
+func (v *VlanConfig) validate() error {
+	if v.BaseInterfaceName != "" && v.VlanID == 0 {
+		return errors.New("invalid vlan ID")
+	}
+	if v.BaseInterfaceName == "" && v.VlanID > 0 {
+		return errors.New("base interface is empty")
+	}
+	return nil
+}
+
+// Process prints and processes env to config
+func (c *Config) Process() error {
+	if err := envconfig.Usage("nse", c); err != nil {
+		return errors.Wrap(err, "cannot show usage of envconfig nse")
+	}
+	if err := envconfig.Process("nse", c); err != nil {
+		return errors.Wrap(err, "cannot process envconfig nse")
+	}
+	return nil
 }
 
 func main() {
@@ -82,7 +132,7 @@ func main() {
 	config := processConfig()
 	source := getX509Source(ctx)
 
-	responderEndpoint := endpoint.NewServer(
+	responderEndpoint := endpoint.NewServer(ctx,
 		spiffejwt.TokenGeneratorFunc(source, config.MaxTokenLifetime),
 		endpoint.WithName(config.Name),
 		endpoint.WithAuthorizeServer(authorize.NewServer()),
@@ -91,7 +141,7 @@ func main() {
 			recvfd.NewServer(),
 			mechanisms.NewServer(map[string]networkservice.NetworkServiceServer{
 				kernelmech.MECHANISM: kernel.NewServer(),
-				vlanmech.MECHANISM:   vlan.NewServer(),
+				vlanmech.MECHANISM:   vlan.NewServer(config.VlanBase.BaseInterfaceName, config.VlanBase.VlanID, config.VlanOneLeg),
 			}),
 			&mechanismClient{},
 			sendfd.NewServer()))
@@ -219,22 +269,22 @@ func newSimpleIpam(config *Config) *simpleIpam {
 		point2Point: config.Point2Point,
 	}
 	sipam.ones, sipam.bits = net.Mask.Size()
-	
+
 	if config.MeridioIpam != "" {
 		// Request a CIDR from the meridio ipam service.
 		// We require a mask <= 16 for the configured CIDR and request a /24 IPv4 cidr.
 		if sipam.bits != 32 || sipam.ones > 16 {
 			logrus.Fatalf("MeridioIpam requies IPv4 with mask <= 16: %s", config.CidrPrefix)
 		}
-        ipamClient, err := meridioipam.NewIpamClient(config.MeridioIpam)
-        if err != nil {
+		ipamClient, err := meridioipam.NewIpamClient(config.MeridioIpam)
+		if err != nil {
 			logrus.Fatalf("Error creating New Ipam Client: %+v", err)
-        }
+		}
 		subnetPool, err := netlink.ParseAddr(config.CidrPrefix)
-        proxySubnet, err := ipamClient.AllocateSubnet(subnetPool, 24)
-        if err != nil {
+		proxySubnet, err := ipamClient.AllocateSubnet(subnetPool, 24)
+		if err != nil {
 			logrus.Fatalf("Error AllocateSubnet: %+v", err)
-        }
+		}
 		logrus.Infof("Using MeridioIpam cidr; %s", proxySubnet.String())
 		sipam.ipam, err = ipam.New(proxySubnet.String())
 		if err != nil {
@@ -318,9 +368,6 @@ func (s *simpleIpam) Close(
 	return next.Server(ctx).Close(ctx, conn)
 }
 
-
-
-
 // ----------------------------------------------------------------------
 
 type mechanismClient struct {
@@ -332,7 +379,7 @@ func (k *mechanismClient) Request(
 
 	conn, err := next.Server(ctx).Request(ctx, request)
 	if err != nil {
-		return conn, err;
+		return conn, err
 	}
 
 	k.mutex.Lock()
@@ -352,7 +399,7 @@ func (k *mechanismClient) Request(
 	}
 
 	// This call is just for logging the request
-	err = requestCallout(ctx, &networkservice.NetworkServiceRequest{Connection:conn})
+	err = requestCallout(ctx, &networkservice.NetworkServiceRequest{Connection: conn})
 	if err != nil {
 		logrus.Infof("requestCallout err %v", err)
 	}
@@ -366,8 +413,6 @@ func (k *mechanismClient) Close(
 	k.mutex.Unlock()
 	return next.Server(ctx).Close(ctx, conn)
 }
-
-
 
 // ----------------------------------------------------------------------
 // Callout functions
