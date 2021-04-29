@@ -22,10 +22,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"os/exec"
 	"net"
 	"net/url"
+	"os"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -41,7 +41,6 @@ import (
 	"github.com/Nordix/simple-ipam/pkg/ipam"
 	"github.com/networkservicemesh/api/pkg/api/networkservice"
 	kernelmech "github.com/networkservicemesh/api/pkg/api/networkservice/mechanisms/kernel"
-	"github.com/networkservicemesh/api/pkg/api/networkservice/payload"
 	registryapi "github.com/networkservicemesh/api/pkg/api/registry"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/chains/endpoint"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/authorize"
@@ -65,6 +64,7 @@ type Config struct {
 	ConnectTo        url.URL           `default:"unix:///var/lib/networkservicemesh/nsm.io.sock" desc:"url to connect to" split_words:"true"`
 	MaxTokenLifetime time.Duration     `default:"24h" desc:"maximum lifetime of tokens" split_words:"true"`
 	ServiceName      string            `default:"nse-generic" desc:"Name of providing service" split_words:"true"`
+	Payload          string            `default:"ETHERNET" desc:"Name of provided service payload" split_words:"true"`
 	Labels           map[string]string `default:"" desc:"Endpoint labels"`
 	CidrPrefix       string            `default:"169.254.0.0/16" desc:"CIDR Prefix to assign IPs from" split_words:"true"`
 	Ipv6Prefix       string            `default:"" desc:"Ipv6 Prefix for dual-stack" split_words:"true"`
@@ -126,7 +126,7 @@ func main() {
 
 	_, err = registryapi.NewNetworkServiceRegistryClient(cc).Register(context.Background(), &registryapi.NetworkService{
 		Name:    config.ServiceName,
-		Payload: payload.IP,
+		Payload: config.Payload,
 	})
 	if err != nil {
 		logrus.Fatalf("unable to register ns %+v", err)
@@ -214,22 +214,22 @@ func newSimpleIpam(config *Config) *simpleIpam {
 		point2Point: config.Point2Point,
 	}
 	sipam.ones, sipam.bits = net.Mask.Size()
-	
+
 	if config.MeridioIpam != "" {
 		// Request a CIDR from the meridio ipam service.
 		// We require a mask <= 16 for the configured CIDR and request a /24 IPv4 cidr.
 		if sipam.bits != 32 || sipam.ones > 16 {
 			logrus.Fatalf("MeridioIpam requies IPv4 with mask <= 16: %s", config.CidrPrefix)
 		}
-        ipamClient, err := meridioipam.NewIpamClient(config.MeridioIpam)
-        if err != nil {
+		ipamClient, err := meridioipam.NewIpamClient(config.MeridioIpam)
+		if err != nil {
 			logrus.Fatalf("Error creating New Ipam Client: %+v", err)
-        }
+		}
 		subnetPool, err := netlink.ParseAddr(config.CidrPrefix)
-        proxySubnet, err := ipamClient.AllocateSubnet(subnetPool, 24)
-        if err != nil {
+		proxySubnet, err := ipamClient.AllocateSubnet(subnetPool, 24)
+		if err != nil {
 			logrus.Fatalf("Error AllocateSubnet: %+v", err)
-        }
+		}
 		logrus.Infof("Using MeridioIpam cidr; %s", proxySubnet.String())
 		sipam.ipam, err = ipam.New(proxySubnet.String())
 		if err != nil {
@@ -313,9 +313,6 @@ func (s *simpleIpam) Close(
 	return next.Server(ctx).Close(ctx, conn)
 }
 
-
-
-
 // ----------------------------------------------------------------------
 
 type mechanismClient struct {
@@ -327,7 +324,7 @@ func (k *mechanismClient) Request(
 
 	conn, err := next.Server(ctx).Request(ctx, request)
 	if err != nil {
-		return conn, err;
+		return conn, err
 	}
 
 	k.mutex.Lock()
@@ -347,7 +344,7 @@ func (k *mechanismClient) Request(
 	}
 
 	// This call is just for logging the request
-	err = requestCallout(ctx, &networkservice.NetworkServiceRequest{Connection:conn})
+	err = requestCallout(ctx, &networkservice.NetworkServiceRequest{Connection: conn})
 	if err != nil {
 		logrus.Infof("requestCallout err %v", err)
 	}
@@ -361,8 +358,6 @@ func (k *mechanismClient) Close(
 	k.mutex.Unlock()
 	return next.Server(ctx).Close(ctx, conn)
 }
-
-
 
 // ----------------------------------------------------------------------
 // Callout functions
