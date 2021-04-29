@@ -45,7 +45,6 @@ import (
 	"github.com/networkservicemesh/api/pkg/api/networkservice"
 	kernelmech "github.com/networkservicemesh/api/pkg/api/networkservice/mechanisms/kernel"
 	vlanmech "github.com/networkservicemesh/api/pkg/api/networkservice/mechanisms/vlan"
-	"github.com/networkservicemesh/api/pkg/api/networkservice/payload"
 	registryapi "github.com/networkservicemesh/api/pkg/api/registry"
 	"github.com/networkservicemesh/sdk-kernel/pkg/kernel/networkservice/common/mechanisms/vlan"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/chains/endpoint"
@@ -70,6 +69,7 @@ type Config struct {
 	ConnectTo        url.URL           `default:"unix:///var/lib/networkservicemesh/nsm.io.sock" desc:"url to connect to" split_words:"true"`
 	MaxTokenLifetime time.Duration     `default:"24h" desc:"maximum lifetime of tokens" split_words:"true"`
 	ServiceName      string            `default:"nse-generic" desc:"Name of providing service" split_words:"true"`
+	Payload          string            `default:"ETHERNET" desc:"Name of provided service payload" split_words:"true"`
 	Labels           map[string]string `default:"" desc:"Endpoint labels"`
 	CidrPrefix       string            `default:"169.254.0.0/16" desc:"CIDR Prefix to assign IPs from" split_words:"true"`
 	Ipv6Prefix       string            `default:"" desc:"Ipv6 Prefix for dual-stack" split_words:"true"`
@@ -180,7 +180,7 @@ func main() {
 
 	_, err = registryapi.NewNetworkServiceRegistryClient(cc).Register(context.Background(), &registryapi.NetworkService{
 		Name:    config.ServiceName,
-		Payload: payload.IP,
+		Payload: config.Payload,
 	})
 
 	if err != nil {
