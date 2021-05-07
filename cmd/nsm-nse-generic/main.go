@@ -20,20 +20,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"net"
 	"net/url"
 	"os"
-	"os/exec"
-	"strconv"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/edwarnicke/grpcfd"
-	"github.com/golang/protobuf/ptypes/empty"
 	"github.com/kelseyhightower/envconfig"
+	"github.com/networkservicemesh/sdk-kernel/pkg/kernel/networkservice/common/mechanisms/vlan"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
@@ -41,111 +35,153 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	"github.com/Nordix/simple-ipam/pkg/ipam"
+	nested "github.com/antonfisher/nested-logrus-formatter"
 	"github.com/networkservicemesh/api/pkg/api/networkservice"
 	kernelmech "github.com/networkservicemesh/api/pkg/api/networkservice/mechanisms/kernel"
 	vlanmech "github.com/networkservicemesh/api/pkg/api/networkservice/mechanisms/vlan"
 	registryapi "github.com/networkservicemesh/api/pkg/api/registry"
-	"github.com/networkservicemesh/sdk-kernel/pkg/kernel/networkservice/common/mechanisms/vlan"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/chains/endpoint"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/authorize"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/kernel"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/recvfd"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/sendfd"
-	"github.com/networkservicemesh/sdk/pkg/networkservice/core/next"
+	"github.com/networkservicemesh/sdk/pkg/networkservice/ipam/point2pointipam"
+	registryclient "github.com/networkservicemesh/sdk/pkg/registry/chains/client"
 	registryrefresh "github.com/networkservicemesh/sdk/pkg/registry/common/refresh"
 	registrysendfd "github.com/networkservicemesh/sdk/pkg/registry/common/sendfd"
 	registrychain "github.com/networkservicemesh/sdk/pkg/registry/core/chain"
+	"github.com/networkservicemesh/sdk/pkg/tools/debug"
 	"github.com/networkservicemesh/sdk/pkg/tools/grpcutils"
+	"github.com/networkservicemesh/sdk/pkg/tools/jaeger"
+	"github.com/networkservicemesh/sdk/pkg/tools/log"
+	"github.com/networkservicemesh/sdk/pkg/tools/log/logruslogger"
+	"github.com/networkservicemesh/sdk/pkg/tools/opentracing"
 	"github.com/networkservicemesh/sdk/pkg/tools/spiffejwt"
-	meridioipam "github.com/nordix/meridio/pkg/ipam"
-	"github.com/vishvananda/netlink"
 )
 
-// Config holds configuration parameters from environment variables
 type Config struct {
-	Name             string            `default:"nse-generic" desc:"Name of the endpoint"`
+	Name             string            `default:"vlan-server" desc:"Name of the endpoint"`
 	ConnectTo        url.URL           `default:"unix:///var/lib/networkservicemesh/nsm.io.sock" desc:"url to connect to" split_words:"true"`
 	MaxTokenLifetime time.Duration     `default:"24h" desc:"maximum lifetime of tokens" split_words:"true"`
-	ServiceName      string            `default:"nse-generic" desc:"Name of providing service" split_words:"true"`
+	ServiceName      string            `default:"nse-vlan" desc:"Name of providing service" split_words:"true"`
 	Payload          string            `default:"ETHERNET" desc:"Name of provided service payload" split_words:"true"`
 	Labels           map[string]string `default:"" desc:"Endpoint labels"`
 	CidrPrefix       string            `default:"169.254.0.0/16" desc:"CIDR Prefix to assign IPs from" split_words:"true"`
-	Ipv6Prefix       string            `default:"" desc:"Ipv6 Prefix for dual-stack" split_words:"true"`
-	Point2Point      bool              `default:"True" desc:"Use /32 or /128 addresses" split_words:"false"`
-	MeridioIpam      string            `default:"" desc:"Example: meridio-ipam:7777" split_words:"true"`
-	VlanBase         VlanConfig        `default:"" desc:"Base interface for vlan and vlan ID separated by a single period (.)" split_words:"true"`
+	VlanBaseIfname   string            `default:"" desc:"Base interface name for vlan interface" split_words:"true"`
+	VlanId           int32             `default:"" desc:"Vlan ID for vlan interface" split_words:"true"`
 	VlanOneLeg       bool              `default:"False" desc:"Create vlan interface in service client only" split_words:"true"`
 }
 
-type VlanConfig struct {
-	BaseInterfaceName string
-	VlanID            int32
-}
-
-func (v *VlanConfig) UnmarshalBinary(bytes []byte) (err error) {
-	text := string(bytes)
-	split := strings.Split(text, ".")
-	if len(split) == 2 {
-		v.BaseInterfaceName = strings.TrimSpace(split[0])
-		v.VlanID, err = func(s string) (int32, error) {
-			// vlan ID range is 0 to 4,095 stored in 12 bit
-			i, err := strconv.ParseInt(s, 10, 12)
-			if err != nil {
-				return 0, err
-			}
-			return int32(i), nil
-		}(strings.TrimSpace(split[1]))
-		if err != nil {
-			return errors.Errorf("invalid vlanId: %s", text)
-		}
+// processConfig prints and processes env to config
+func processConfig() *Config {
+	c := new(Config)
+	if err := envconfig.Usage("nse", c); err != nil {
+		logrus.Fatal(err)
 	}
-	return v.validate()
+	if err := envconfig.Process("nse", c); err != nil {
+		logrus.Fatalf("cannot process envconfig nse %+v", err)
+	}
+	return c
 }
 
-func (v *VlanConfig) validate() error {
-	if v.BaseInterfaceName != "" && v.VlanID == 0 {
+func validateConfig(cfg *Config) error {
+	// vlan ID range is 0 to 4,095
+	if cfg.VlanBaseIfname != "" && (cfg.VlanId < 1 || cfg.VlanId > 4095) {
 		return errors.New("invalid vlan ID")
 	}
-	if v.BaseInterfaceName == "" && v.VlanID > 0 {
+	if cfg.VlanBaseIfname == "" && cfg.VlanId > 0 {
 		return errors.New("base interface is empty")
 	}
 	return nil
 }
 
-// Process prints and processes env to config
-func (c *Config) Process() error {
-	if err := envconfig.Usage("nse", c); err != nil {
-		return errors.Wrap(err, "cannot show usage of envconfig nse")
-	}
-	if err := envconfig.Process("nse", c); err != nil {
-		return errors.Wrap(err, "cannot process envconfig nse")
-	}
-	return nil
-}
-
 func main() {
+	// ********************************************************************************
+	// setup context to catch signals
+	// ********************************************************************************
 	ctx := context.Background()
 	ctx, cancel := context.WithCancel(ctx)
 
-	config := processConfig()
-	source := getX509Source(ctx)
+	// ********************************************************************************
+	// setup logging
+	// ********************************************************************************
+	logrus.SetFormatter(&nested.Formatter{})
+	ctx = log.WithFields(ctx, map[string]interface{}{"cmd": os.Args[0]})
+	ctx = log.WithLog(ctx, logruslogger.New(ctx))
 
+	if err := debug.Self(); err != nil {
+		log.FromContext(ctx).Infof("%s", err)
+	}
+	logger := log.FromContext(ctx)
+
+	// ********************************************************************************
+	// Configure open tracing
+	// ********************************************************************************
+	log.EnableTracing(true)
+	jaegerCloser := jaeger.InitJaeger(ctx, "cmd-nse-vfio")
+	defer func() { _ = jaegerCloser.Close() }()
+
+	// enumerating phases
+	logger.Infof("there are 4 phases which will be executed followed by a success message:")
+	logger.Infof("the phases include:")
+	logger.Infof("1: get config from environment")
+	logger.Infof("2: retrieve spiffe svid")
+	logger.Infof("executing phase 3: creating ipam")
+	logger.Infof("4: create network service endpoint")
+	logger.Infof("5: create grpc server and register the server")
+	logger.Infof("6: register nse with nsm")
+	starttime := time.Now()
+
+	// ********************************************************************************
+	logger.Infof("executing phase 1: get config from environment")
+	// ********************************************************************************
+	config := processConfig()
+	if err := validateConfig(config); err != nil {
+		logrus.Fatalf("configuration validation failed %v", err.Error())
+	}
+	logger.Infof("Config: %#v", config)
+
+	// ********************************************************************************
+	logger.Infof("executing phase 2: retrieving svid, check spire agent logs if this is the last line you see")
+	// ********************************************************************************
+	source, err := workloadapi.NewX509Source(ctx)
+	if err != nil {
+		logger.Fatalf("error getting x509 source: %v", err.Error())
+	}
+	svid, err := source.GetX509SVID()
+	if err != nil {
+		logger.Fatalf("error getting x509 svid: %v", err.Error())
+	}
+	logger.Infof("sVID: %q", svid.ID)
+
+	// ********************************************************************************
+	log.FromContext(ctx).Infof("executing phase 3: creating ipam")
+	// ********************************************************************************
+	_, ipnet, err := net.ParseCIDR(config.CidrPrefix)
+	if err != nil {
+		log.FromContext(ctx).Fatalf("error parsing cidr: %+v", err)
+	}
+
+	// ********************************************************************************
+	logger.Infof("executing phase 4: create network service endpoint")
+	// ********************************************************************************
 	responderEndpoint := endpoint.NewServer(ctx,
 		spiffejwt.TokenGeneratorFunc(source, config.MaxTokenLifetime),
 		endpoint.WithName(config.Name),
 		endpoint.WithAuthorizeServer(authorize.NewServer()),
 		endpoint.WithAdditionalFunctionality(
-			newSimpleIpam(config),
+			point2pointipam.NewServer(ipnet),
 			recvfd.NewServer(),
 			mechanisms.NewServer(map[string]networkservice.NetworkServiceServer{
 				kernelmech.MECHANISM: kernel.NewServer(),
-				vlanmech.MECHANISM:   vlan.NewServer(config.VlanBase.BaseInterfaceName, config.VlanBase.VlanID, config.VlanOneLeg),
+				vlanmech.MECHANISM:   vlan.NewServer(config.VlanBaseIfname, config.VlanId, config.VlanOneLeg),
 			}),
-			&mechanismClient{},
 			sendfd.NewServer()))
 
+	// ********************************************************************************
+	logger.Infof("executing phase 5: create grpc server and register the server")
+	// ********************************************************************************
 	serverCreds := grpc.Creds(
 		grpcfd.TransportCredentials(
 			credentials.NewTLS(
@@ -153,6 +189,7 @@ func main() {
 			),
 		),
 	)
+
 	clientCreds := grpc.WithTransportCredentials(
 		grpcfd.TransportCredentials(
 			credentials.NewTLS(
@@ -161,13 +198,20 @@ func main() {
 		),
 	)
 
-	server := grpc.NewServer(serverCreds)
+	options := append(
+		opentracing.WithTracing(),
+		serverCreds)
+	server := grpc.NewServer(options...)
 	responderEndpoint.Register(server)
 	listenOn := &(url.URL{Scheme: "unix", Path: "/tmp/listen.on"})
 	srvErrCh := grpcutils.ListenAndServe(ctx, listenOn, server)
 	exitOnErr(ctx, cancel, srvErrCh)
-	logrus.Infof("grpc server started")
 
+	logger.Infof("grpc server started")
+
+	// ********************************************************************************
+	logger.Infof("executing phase 6: register nse with nsm")
+	// ********************************************************************************
 	cc, err := grpc.DialContext(ctx,
 		grpcutils.URLToTarget(&config.ConnectTo),
 		grpc.WithBlock(),
@@ -175,16 +219,16 @@ func main() {
 		clientCreds,
 	)
 	if err != nil {
-		logrus.Fatalf("error establishing grpc connection to registry server %+v", err)
+		logger.Fatalf("error establishing grpc connection to registry server %+v", err)
 	}
 
-	_, err = registryapi.NewNetworkServiceRegistryClient(cc).Register(context.Background(), &registryapi.NetworkService{
+	_, err = registryclient.NewNetworkServiceRegistryClient(cc).Register(context.Background(), &registryapi.NetworkService{
 		Name:    config.ServiceName,
 		Payload: config.Payload,
 	})
 
 	if err != nil {
-		logrus.Fatalf("unable to register ns %+v", err)
+		logger.Fatalf("unable to register ns %+v", err)
 	}
 
 	registryClient := registrychain.NewNetworkServiceEndpointRegistryClient(
@@ -202,12 +246,14 @@ func main() {
 		},
 		Url: listenOn.String(),
 	})
-	logrus.Infof("nse: %+v", nse)
 
 	if err != nil {
-		logrus.Fatalf("unable to register nse %+v", err)
+		logger.Fatalf("unable to register nse %+v", err)
 	}
-
+	logrus.Infof("nse: %+v", nse)
+	// ********************************************************************************
+	logger.Infof("startup completed in %v", time.Since(starttime))
+	// ********************************************************************************
 	// wait for server to exit
 	<-ctx.Done()
 }
@@ -225,275 +271,4 @@ func exitOnErr(ctx context.Context, cancel context.CancelFunc, errCh <-chan erro
 		logrus.Error(err)
 		cancel()
 	}(ctx, errCh)
-}
-
-func getX509Source(ctx context.Context) *workloadapi.X509Source {
-	source, err := workloadapi.NewX509Source(ctx)
-	if err != nil {
-		logrus.Fatalf("error getting x509 source: %+v", err)
-	}
-	svid, err := source.GetX509SVID()
-	if err != nil {
-		logrus.Fatalf("error getting x509 svid: %+v", err)
-	}
-	logrus.Infof("SVID: %q", svid.ID)
-	return source
-}
-
-// Process prints and processes env to config
-func processConfig() *Config {
-	c := new(Config)
-	if err := envconfig.Process("nse", c); err != nil {
-		logrus.Fatalf("cannot process envconfig nse %+v", err)
-	}
-	logrus.Infof("Config: %#v", c)
-	return c
-}
-
-type simpleIpam struct {
-	ipam        *ipam.IPAM
-	ipv6Prefix  string
-	point2Point bool
-	myIP        string
-	bits        int
-	ones        int
-}
-
-func newSimpleIpam(config *Config) *simpleIpam {
-	_, net, err := net.ParseCIDR(config.CidrPrefix)
-	if err != nil {
-		logrus.Fatalf("Could not parse cidr %s; %+v", config.CidrPrefix, err)
-	}
-	sipam := &simpleIpam{
-		ipv6Prefix:  config.Ipv6Prefix,
-		point2Point: config.Point2Point,
-	}
-	sipam.ones, sipam.bits = net.Mask.Size()
-
-	if config.MeridioIpam != "" {
-		// Request a CIDR from the meridio ipam service.
-		// We require a mask <= 16 for the configured CIDR and request a /24 IPv4 cidr.
-		if sipam.bits != 32 || sipam.ones > 16 {
-			logrus.Fatalf("MeridioIpam requies IPv4 with mask <= 16: %s", config.CidrPrefix)
-		}
-		ipamClient, err := meridioipam.NewIpamClient(config.MeridioIpam)
-		if err != nil {
-			logrus.Fatalf("Error creating New Ipam Client: %+v", err)
-		}
-		subnetPool, err := netlink.ParseAddr(config.CidrPrefix)
-		proxySubnet, err := ipamClient.AllocateSubnet(subnetPool, 24)
-		if err != nil {
-			logrus.Fatalf("Error AllocateSubnet: %+v", err)
-		}
-		logrus.Infof("Using MeridioIpam cidr; %s", proxySubnet.String())
-		sipam.ipam, err = ipam.New(proxySubnet.String())
-		if err != nil {
-			logrus.Fatalf("Could not create ipam for %s; %+v", config.CidrPrefix, err)
-		}
-	} else {
-		sipam.ipam, err = ipam.New(config.CidrPrefix)
-		if err != nil {
-			logrus.Fatalf("Could not create ipam for %s; %+v", config.CidrPrefix, err)
-		}
-	}
-	return sipam
-}
-
-func (s *simpleIpam) Request(
-	ctx context.Context, request *networkservice.NetworkServiceRequest) (*networkservice.Connection, error) {
-
-	conn := request.GetConnection()
-	if conn.GetContext() == nil {
-		conn.Context = &networkservice.ConnectionContext{}
-	}
-	context := conn.GetContext()
-	if context.GetIpContext() == nil {
-		context.IpContext = &networkservice.IPContext{}
-	}
-	ipContext := context.GetIpContext()
-
-	if s.point2Point {
-		// Compute the mask "/32" or "/128"
-		mask := fmt.Sprintf("/%d", s.bits)
-
-		if addr, err := s.ipam.Allocate(); err != nil {
-			return nil, err
-		} else {
-			ipContext.SrcIpAddr = addr.String() + mask
-			ipContext.DstRoutes = []*networkservice.Route{
-				{
-					Prefix: addr.String() + mask,
-				},
-			}
-		}
-
-		if addr, err := s.ipam.Allocate(); err != nil {
-			return nil, err
-		} else {
-			ipContext.DstIpAddr = addr.String() + mask
-			ipContext.SrcRoutes = []*networkservice.Route{
-				{
-					Prefix: addr.String() + mask,
-				},
-			}
-		}
-		return next.Server(ctx).Request(ctx, request)
-	}
-
-	// Not point-to-point connection
-
-	// Compute the mask. Same as the ipam.CIDR
-	mask := fmt.Sprintf("/%d", s.ones)
-
-	// The NSE has only one interface hence only one address
-	if s.myIP == "" {
-		if addr, err := s.ipam.Allocate(); err != nil {
-			return nil, err
-		} else {
-			s.myIP = addr.String() + mask
-		}
-	}
-	ipContext.SrcIpAddr = s.myIP
-	if addr, err := s.ipam.Allocate(); err != nil {
-		return nil, err
-	} else {
-		ipContext.DstIpAddr = addr.String() + mask
-	}
-
-	return next.Server(ctx).Request(ctx, request)
-}
-func (s *simpleIpam) Close(
-	ctx context.Context, conn *networkservice.Connection) (_ *empty.Empty, err error) {
-	// TODO free addresses here?
-	return next.Server(ctx).Close(ctx, conn)
-}
-
-// ----------------------------------------------------------------------
-
-type mechanismClient struct {
-	mutex sync.Mutex
-}
-
-func (k *mechanismClient) Request(
-	ctx context.Context, request *networkservice.NetworkServiceRequest) (*networkservice.Connection, error) {
-
-	conn, err := next.Server(ctx).Request(ctx, request)
-	if err != nil {
-		return conn, err
-	}
-
-	k.mutex.Lock()
-	mechanisms, err := mechanismCallout(ctx)
-	k.mutex.Unlock()
-	if err != nil {
-		logrus.Infof("mechanismCallout err %v", err)
-	}
-
-	// We only handle the "name" parameter from one (any) mechanism
-	if len(mechanisms) > 0 {
-		if mechanisms[0].Parameters != nil {
-			if name, ok := mechanisms[0].Parameters["name"]; ok {
-				conn.Mechanism.Parameters["name"] = name
-			}
-		}
-	}
-
-	// This call is just for logging the request
-	err = requestCallout(ctx, &networkservice.NetworkServiceRequest{Connection: conn})
-	if err != nil {
-		logrus.Infof("requestCallout err %v", err)
-	}
-	return conn, err
-}
-
-func (k *mechanismClient) Close(
-	ctx context.Context, conn *networkservice.Connection) (*empty.Empty, error) {
-	k.mutex.Lock()
-	closeCallout(ctx, conn)
-	k.mutex.Unlock()
-	return next.Server(ctx).Close(ctx, conn)
-}
-
-// ----------------------------------------------------------------------
-// Callout functions
-
-func calloutProgram() string {
-	callout := os.Getenv("CALLOUT")
-	if callout == "" {
-		return "/bin/nse.sh"
-	}
-	return callout
-}
-
-func initCallout() error {
-	logrus.Infof("initCallout")
-	cmd := exec.Command(calloutProgram(), "init")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return err
-	} else {
-		fmt.Println(string(out))
-	}
-	return nil
-}
-
-// Send the Request in json format on stdin to the callout script
-func requestCallout(ctx context.Context, req *networkservice.NetworkServiceRequest) error {
-	logrus.Infof("requestCallout")
-	cmd := exec.Command(calloutProgram(), "request")
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return err
-	}
-	enc := json.NewEncoder(stdin)
-	go func() {
-		defer stdin.Close()
-		_ = enc.Encode(req)
-	}()
-	if out, err := cmd.Output(); err != nil {
-		return err
-	} else {
-		fmt.Println(string(out))
-	}
-	return nil
-}
-
-// Send the Request in json format on stdin to the callout script
-func closeCallout(ctx context.Context, conn *networkservice.Connection) error {
-	logrus.Infof("closeCallout")
-	cmd := exec.Command(calloutProgram(), "close")
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return err
-	}
-	enc := json.NewEncoder(stdin)
-	go func() {
-		defer stdin.Close()
-		_ = enc.Encode(conn)
-	}()
-	if out, err := cmd.Output(); err != nil {
-		return err
-	} else {
-		fmt.Println(string(out))
-	}
-	return nil
-}
-
-// Expect a Mechanism array in json format on stdout from the callout script
-func mechanismCallout(ctx context.Context) ([]*networkservice.Mechanism, error) {
-	logrus.Infof("mechanismCallout")
-	cmd := exec.Command(calloutProgram(), "mechanism")
-	out, err := cmd.Output()
-	if err != nil {
-		logrus.Infof("mechanismCallout err %v", err)
-		return nil, err
-	}
-	fmt.Println(string(out))
-
-	var m []*networkservice.Mechanism
-	err = json.Unmarshal(out, &m)
-	if err != nil {
-		logrus.Infof("mechanismCallout Unmarshal err %v", err)
-		return nil, err
-	}
-	return m, nil
 }
