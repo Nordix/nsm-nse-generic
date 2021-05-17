@@ -58,11 +58,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
-	"github.com/vishvananda/netlink"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-
-	meridioipam "github.com/nordix/meridio/pkg/ipam"
 )
 
 type Config struct {
@@ -74,8 +71,6 @@ type Config struct {
 	Labels           map[string]string `default:"" desc:"Endpoint labels"`
 	CidrPrefix       string            `default:"169.254.0.0/16" desc:"CIDR Prefix to assign IPs from" split_words:"true"`
 	Ipv6Prefix       string            `default:"" desc:"Ipv6 Prefix for dual-stack" split_words:"true"`
-	Point2Point      bool              `default:"True" desc:"Use /32 or /128 addresses" split_words:"false"`
-	MeridioIpam      string            `default:"" desc:"Example: meridio-ipam:7777" split_words:"true"`
 	VlanBaseIfname   string            `default:"" desc:"Base interface name for vlan interface" split_words:"true"`
 	VlanId           int32             `default:"" desc:"Vlan ID for vlan interface" split_words:"true"`
 }
@@ -272,12 +267,10 @@ func exitOnErr(ctx context.Context, cancel context.CancelFunc, errCh <-chan erro
 }
 
 type simpleIpam struct {
-	ipam        *ipam.IPAM
-	ipv6Prefix  string
-	point2Point bool
-	myIP        string
-	bits        int
-	ones        int
+	ipam       *ipam.IPAM
+	ipv6Prefix string
+	myIP       string
+	ones       int
 }
 
 func newSimpleIpam(config *Config) *simpleIpam {
@@ -286,40 +279,15 @@ func newSimpleIpam(config *Config) *simpleIpam {
 		logrus.Fatalf("Could not parse cidr %s; %+v", config.CidrPrefix, err)
 	}
 	sipam := &simpleIpam{
-		ipv6Prefix:  config.Ipv6Prefix,
-		point2Point: config.Point2Point,
+		ipv6Prefix: config.Ipv6Prefix,
 	}
-	sipam.ones, sipam.bits = net.Mask.Size()
+	sipam.ones, _ = net.Mask.Size()
 
-	if config.MeridioIpam != "" {
-		// Request a CIDR from the meridio ipam service.
-		// We require a mask <= 16 for the configured CIDR and request a /24 IPv4 cidr.
-		if sipam.bits != 32 || sipam.ones > 16 {
-			logrus.Fatalf("MeridioIpam requies IPv4 with mask <= 16: %s", config.CidrPrefix)
-		}
-		ipamClient, err := meridioipam.NewIpamClient(config.MeridioIpam)
-		if err != nil {
-			logrus.Fatalf("Error creating New Ipam Client: %+v", err)
-		}
-		_, err = netlink.ParseAddr(config.CidrPrefix)
-		if err != nil {
-			logrus.Fatalf("Error Parsing subnet pool")
-		}
-		proxySubnet, err := ipamClient.AllocateSubnet(config.CidrPrefix, 24)
-		if err != nil {
-			logrus.Fatalf("Error AllocateSubnet: %+v", err)
-		}
-		logrus.Infof("Using MeridioIpam cidr; %s", proxySubnet)
-		sipam.ipam, err = ipam.New(proxySubnet)
-		if err != nil {
-			logrus.Fatalf("Could not create ipam for %s; %+v", config.CidrPrefix, err)
-		}
-	} else {
-		sipam.ipam, err = ipam.New(config.CidrPrefix)
-		if err != nil {
-			logrus.Fatalf("Could not create ipam for %s; %+v", config.CidrPrefix, err)
-		}
+	sipam.ipam, err = ipam.New(config.CidrPrefix)
+	if err != nil {
+		logrus.Fatalf("Could not create ipam for %s; %+v", config.CidrPrefix, err)
 	}
+
 	sipam.ipam.ReserveFirstAndLast()
 	return sipam
 }
@@ -337,35 +305,6 @@ func (s *simpleIpam) Request(
 	}
 	ipContext := context.GetIpContext()
 
-	if s.point2Point {
-		// Compute the mask "/32" or "/128"
-		mask := fmt.Sprintf("/%d", s.bits)
-
-		if addr, err := s.ipam.Allocate(); err != nil {
-			return nil, err
-		} else {
-			ipContext.SrcIpAddrs = []string{addr.String() + mask}
-			ipContext.DstRoutes = []*networkservice.Route{
-				{
-					Prefix: addr.String() + mask,
-				},
-			}
-		}
-
-		if addr, err := s.ipam.Allocate(); err != nil {
-			return nil, err
-		} else {
-			ipContext.DstIpAddrs = []string{addr.String() + mask}
-			ipContext.SrcRoutes = []*networkservice.Route{
-				{
-					Prefix: addr.String() + mask,
-				},
-			}
-		}
-		return next.Server(ctx).Request(ctx, request)
-	}
-
-	// Not point-to-point connection
 	// Compute the mask. Same as the ipam.CIDR
 	mask := fmt.Sprintf("/%d", s.ones)
 

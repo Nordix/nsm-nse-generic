@@ -37,7 +37,7 @@ dbg() {
 ##
 cmd_env() {
 
-	test -n "$__tag" || __tag="registry.nordix.org/cloud-native/nsm/nse-generic:latest"
+	test -n "$__tag" || __tag="registry.nordix.org/cloud-native/nsm/nse-vlan:latest"
 
 	if test "$cmd" = "env"; then
 		set | grep -E '^(__.*)='
@@ -46,7 +46,7 @@ cmd_env() {
 }
 
 
-##  image [--tag=registry.nordix.org/cloud-native/nsm/nsm-nse:latest]
+##  image [--tag=registry.nordix.org/cloud-native/nsm/nse-generic:vlan-0.2]
 ##    Create the docker image and upload it to the local registry.
 ##
 cmd_image() {

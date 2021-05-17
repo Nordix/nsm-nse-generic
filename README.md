@@ -1,18 +1,12 @@
 # nsm-nse-generic
 
-A generic NSE for NSM next-gen.
+An NSE for Vlan forwarder in NSM next-gen.
 
-This NSE was created for educational and experimental purposes.
+This NSE was created for test and experimental purposes.
 
-For now it only provides IPAM functionality. Both p-2-p and full L2
-subnet is supported for ipv4 and ipv6.
+For now it only provides IPAM functionality.
 
-Dual-stack is not yet supported since the way to implement dual-stack
-is unclear.
-
-The `nse-generic.yaml` file configures the nse-generic to be
-compatible with the
-[cmd-nse-icmp-responder](https://github.com/networkservicemesh/cmd-nse-icmp-responder).
+Dual-stack is not yet supported.
 
 
 ## Build image
@@ -20,6 +14,6 @@ compatible with the
 ```
 ./build.sh image
 # Upload to xcluster local registry
-images lreg_upload --strip-host registry.nordix.org/cloud-native/nsm/nse-generic:latest
+images lreg_upload --strip-host registry.nordix.org/cloud-native/nsm/nse-vlan:latest
 ```
 
