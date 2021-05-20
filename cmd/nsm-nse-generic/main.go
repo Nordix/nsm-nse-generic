@@ -24,9 +24,9 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 
-	"github.com/Nordix/simple-ipam/pkg/ipam"
 	nested "github.com/antonfisher/nested-logrus-formatter"
 	"github.com/edwarnicke/grpcfd"
 	"github.com/golang/protobuf/ptypes/empty"
@@ -43,12 +43,14 @@ import (
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/recvfd"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/sendfd"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/core/next"
+	"github.com/networkservicemesh/sdk/pkg/networkservice/utils/metadata"
 	registryclient "github.com/networkservicemesh/sdk/pkg/registry/chains/client"
 	registryrefresh "github.com/networkservicemesh/sdk/pkg/registry/common/refresh"
 	registrysendfd "github.com/networkservicemesh/sdk/pkg/registry/common/sendfd"
 	registrychain "github.com/networkservicemesh/sdk/pkg/registry/core/chain"
 	"github.com/networkservicemesh/sdk/pkg/tools/debug"
 	"github.com/networkservicemesh/sdk/pkg/tools/grpcutils"
+	"github.com/networkservicemesh/sdk/pkg/tools/ippool"
 	"github.com/networkservicemesh/sdk/pkg/tools/jaeger"
 	"github.com/networkservicemesh/sdk/pkg/tools/log"
 	"github.com/networkservicemesh/sdk/pkg/tools/log/logruslogger"
@@ -129,9 +131,10 @@ func main() {
 	logger.Infof("the phases include:")
 	logger.Infof("1: get config from environment")
 	logger.Infof("2: retrieve spiffe svid")
-	logger.Infof("3: create network service endpoint")
-	logger.Infof("4: create grpc server and register the server")
-	logger.Infof("5: register nse with nsm")
+	logger.Infof("3: parse network prefixes for ipam")
+	logger.Infof("4: create network service endpoint")
+	logger.Infof("5: create grpc server and register the server")
+	logger.Infof("6: register nse with nsm")
 	starttime := time.Now()
 
 	// ********************************************************************************
@@ -157,14 +160,31 @@ func main() {
 	logger.Infof("sVID: %q", svid.ID)
 
 	// ********************************************************************************
-	logger.Infof("executing phase 3: create network service endpoint")
+	log.FromContext(ctx).Infof("executing phase 3: parsing network prefixes for ipam")
+	// ********************************************************************************
+
+	s := []*net.IPNet{}
+	_, ipnet, err := net.ParseCIDR(config.CidrPrefix)
+	if err != nil {
+		logrus.Fatalf("Could not parse cidr %s; %+v", config.CidrPrefix, err)
+	}
+	s = append(s, ipnet)
+	if config.Ipv6Prefix != "" {
+		_, ip6net, err := net.ParseCIDR(config.Ipv6Prefix)
+		if err != nil {
+			log.FromContext(ctx).Fatalf("error parsing cidr: %+v", err)
+		}
+		s = append(s, ip6net)
+	}
+	// ********************************************************************************
+	logger.Infof("executing phase 4: create network service endpoint")
 	// ********************************************************************************
 	responderEndpoint := endpoint.NewServer(ctx,
 		spiffejwt.TokenGeneratorFunc(source, config.MaxTokenLifetime),
 		endpoint.WithName(config.Name),
 		endpoint.WithAuthorizeServer(authorize.NewServer()),
 		endpoint.WithAdditionalFunctionality(
-			newSimpleIpam(config),
+			newSimpleIpam(s...),
 			recvfd.NewServer(),
 			mechanisms.NewServer(map[string]networkservice.NetworkServiceServer{
 				kernelmech.MECHANISM: kernel.NewServer(),
@@ -173,7 +193,7 @@ func main() {
 			sendfd.NewServer()))
 
 	// ********************************************************************************
-	logger.Infof("executing phase 4: create grpc server and register the server")
+	logger.Infof("executing phase 5: create grpc server and register the server")
 	// ********************************************************************************
 	serverCreds := grpc.Creds(
 		grpcfd.TransportCredentials(
@@ -203,7 +223,7 @@ func main() {
 	logger.Infof("grpc server started")
 
 	// ********************************************************************************
-	logger.Infof("executing phase 5: register nse with nsm")
+	logger.Infof("executing phase 6: register nse with nsm")
 	// ********************************************************************************
 	cc, err := grpc.DialContext(ctx,
 		grpcutils.URLToTarget(&config.ConnectTo),
@@ -266,34 +286,67 @@ func exitOnErr(ctx context.Context, cancel context.CancelFunc, errCh <-chan erro
 	}(ctx, errCh)
 }
 
+// ********************************************************************************
+// SimpleIpam
+// ********************************************************************************
 type simpleIpam struct {
-	ipam       *ipam.IPAM
-	ipv6Prefix string
-	myIP       string
-	ones       int
+	ipPools  []*ippool.IPPool
+	prefixes []*net.IPNet
+	myIPs    []string
+	masks    []string
+	once     sync.Once
+	initErr  error
+}
+type IPConnections struct {
+	ipPool  ippool.IPPool
+	dstAddr string
+}
+type connectionInfo struct {
+	connections []*IPConnections
 }
 
-func newSimpleIpam(config *Config) *simpleIpam {
-	_, net, err := net.ParseCIDR(config.CidrPrefix)
-	if err != nil {
-		logrus.Fatalf("Could not parse cidr %s; %+v", config.CidrPrefix, err)
+func (i *connectionInfo) shouldUpdate(exclude *ippool.IPPool) bool {
+	for _, con := range i.connections {
+		dstIP, _, dstErr := net.ParseCIDR(con.dstAddr)
+		if dstErr == nil && exclude.ContainsString(dstIP.String()) {
+			return false
+		}
 	}
-	sipam := &simpleIpam{
-		ipv6Prefix: config.Ipv6Prefix,
-	}
-	sipam.ones, _ = net.Mask.Size()
-
-	sipam.ipam, err = ipam.New(config.CidrPrefix)
-	if err != nil {
-		logrus.Fatalf("Could not create ipam for %s; %+v", config.CidrPrefix, err)
-	}
-
-	sipam.ipam.ReserveFirstAndLast()
-	return sipam
+	return true
 }
 
-func (s *simpleIpam) Request(
-	ctx context.Context, request *networkservice.NetworkServiceRequest) (*networkservice.Connection, error) {
+func newSimpleIpam(prefixes ...*net.IPNet) *simpleIpam {
+
+	return &simpleIpam{
+		prefixes: prefixes,
+	}
+}
+func (sipam *simpleIpam) init() {
+	if len(sipam.prefixes) == 0 {
+		sipam.initErr = errors.New("required one or more prefixes")
+		return
+	}
+	for _, prefix := range sipam.prefixes {
+		if prefix == nil {
+			sipam.initErr = errors.Errorf("prefix must not be nil: %+v", sipam.prefixes)
+			return
+		}
+		ones, _ := prefix.Mask.Size()
+		mask := fmt.Sprintf("/%d", ones)
+		sipam.masks = append(sipam.masks, mask)
+		ipPool := ippool.NewWithNet(prefix)
+		ipPool.ExcludeString(getFirstIp(prefix))
+		ipPool.ExcludeString(getLastIP(prefix))
+		sipam.ipPools = append(sipam.ipPools, ipPool)
+	}
+}
+
+func (s *simpleIpam) Request(ctx context.Context, request *networkservice.NetworkServiceRequest) (*networkservice.Connection, error) {
+
+	s.once.Do(s.init)
+	if s.initErr != nil {
+		return nil, s.initErr
+	}
 
 	conn := request.GetConnection()
 	if conn.GetContext() == nil {
@@ -305,28 +358,148 @@ func (s *simpleIpam) Request(
 	}
 	ipContext := context.GetIpContext()
 
-	// Compute the mask. Same as the ipam.CIDR
-	mask := fmt.Sprintf("/%d", s.ones)
+	excludeIP4, excludeIP6 := exclude(ipContext.GetExcludedPrefixes()...)
 
-	// The NSE has only one interface hence only one address
-	if s.myIP == "" {
-		if addr, err := s.ipam.Allocate(); err != nil {
+	connInfo, loaded := loadConnInfo(ctx)
+	if loaded && (connInfo.shouldUpdate(excludeIP4) || connInfo.shouldUpdate(excludeIP6)) {
+		// some of the existing addresses are excluded
+		s.free(connInfo)
+		loaded = false
+	}
+	var err error
+	if !loaded {
+		if connInfo, err = s.getAddrs(excludeIP4, excludeIP6); err != nil {
 			return nil, err
-		} else {
-			s.myIP = addr.String() + mask
 		}
+		storeConnInfo(ctx, connInfo)
 	}
-	ipContext.SrcIpAddrs = []string{s.myIP}
-	if addr, err := s.ipam.Allocate(); err != nil {
-		return nil, err
-	} else {
-		ipContext.DstIpAddrs = []string{addr.String() + mask}
+	for _, myIP := range s.myIPs {
+		addIP(&ipContext.SrcIpAddrs, myIP)
+	}
+	for _, con := range connInfo.connections {
+		addIP(&ipContext.DstIpAddrs, con.dstAddr)
 	}
 
-	return next.Server(ctx).Request(ctx, request)
+	conn, err = next.Server(ctx).Request(ctx, request)
+	if err != nil {
+		if !loaded {
+			s.free(connInfo)
+		}
+		return nil, err
+	}
+
+	return conn, nil
 }
+
 func (s *simpleIpam) Close(
 	ctx context.Context, conn *networkservice.Connection) (_ *empty.Empty, err error) {
-	// TODO free addresses here?
+	s.once.Do(s.init)
+	if s.initErr != nil {
+		return nil, s.initErr
+	}
+
+	if connInfo, ok := loadConnInfo(ctx); ok {
+		s.free(connInfo)
+	}
 	return next.Server(ctx).Close(ctx, conn)
+}
+
+func getLastIP(ipNet *net.IPNet) string {
+	out := make(net.IP, len(ipNet.IP))
+	for i := 0; i < len(ipNet.IP); i++ {
+		out[i] = ipNet.IP[i] | ^ipNet.Mask[i]
+	}
+
+	return addMaskIp(out)
+}
+func getFirstIp(ipNet *net.IPNet) string {
+	return addMaskIp(ipNet.IP)
+}
+
+func addMaskIp(ip net.IP) string {
+	i := len(ip)
+	if i == net.IPv4len {
+		return ip.String() + "/32"
+	} // else if i == net.IPv6len
+	return ip.String() + "/128"
+}
+
+func addIP(ips *[]string, new string) {
+	for _, ip := range *ips {
+		if ip == new {
+			return
+		}
+	}
+	*ips = append(*ips, new)
+}
+
+func (s *simpleIpam) free(connInfo *connectionInfo) {
+	for _, con := range connInfo.connections {
+		con.ipPool.AddNetString(con.dstAddr)
+	}
+}
+
+func (s *simpleIpam) setMyIP(i int) error {
+	myIP, err := s.ipPools[i].Pull()
+	if err != nil {
+		return err
+	}
+	s.myIPs = append(s.myIPs, myIP.String()+s.masks[i])
+	return nil
+}
+
+func (s *simpleIpam) getAddrs(excludeIP4, excludeIP6 *ippool.IPPool) (connInfo *connectionInfo, err error) {
+
+	connInfo = &connectionInfo{connections: []*IPConnections{}}
+	for i := 0; i < len(s.prefixes); i++ {
+		// The NSE needs only one src address
+		if i >= len(s.myIPs) {
+			if err := s.setMyIP(i); err != nil {
+				return nil, err
+			}
+		} else if excludeIP4.ContainsString(s.myIPs[i]) || excludeIP6.ContainsString(s.myIPs[i]) {
+			if err = s.setMyIP(i); err != nil {
+				return nil, err
+			}
+		}
+		var dstAddr net.IP
+		for {
+			if dstAddr, err = s.ipPools[i].Pull(); err != nil {
+				return nil, err
+			}
+			if !excludeIP4.ContainsString(dstAddr.String()) && !excludeIP6.ContainsString(dstAddr.String()) {
+				break
+			}
+		}
+		if dstAddr != nil {
+			connInfo.connections = append(connInfo.connections, &IPConnections{
+				ipPool:  *s.ipPools[i],
+				dstAddr: dstAddr.String() + s.masks[i],
+			})
+		}
+	}
+	return connInfo, nil
+}
+
+type keyType struct{}
+
+func storeConnInfo(ctx context.Context, connInfo *connectionInfo) {
+	metadata.Map(ctx, false).Store(keyType{}, connInfo)
+}
+
+func loadConnInfo(ctx context.Context) (*connectionInfo, bool) {
+	if raw, ok := metadata.Map(ctx, false).Load(keyType{}); ok {
+		return raw.(*connectionInfo), true
+	}
+	return nil, false
+}
+
+func exclude(prefixes ...string) (ipv4exclude, ipv6exclude *ippool.IPPool) {
+	ipv4exclude = ippool.New(net.IPv4len)
+	ipv6exclude = ippool.New(net.IPv6len)
+	for _, prefix := range prefixes {
+		ipv4exclude.AddNetString(prefix)
+		ipv6exclude.AddNetString(prefix)
+	}
+	return
 }
