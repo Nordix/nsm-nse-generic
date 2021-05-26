@@ -8,8 +8,8 @@ require (
 	github.com/edwarnicke/grpcfd v0.1.0
 	github.com/golang/protobuf v1.5.2
 	github.com/kelseyhightower/envconfig v1.4.0
-	github.com/networkservicemesh/api v0.0.0-20210509180413-5753c9f30588
-	github.com/networkservicemesh/sdk v0.0.0-20210511142251-93d252947219
+	github.com/networkservicemesh/api v0.0.0-20210523193133-30a6f075c760
+	github.com/networkservicemesh/sdk v0.0.0-20210523200103-fb932168d1b8
 	github.com/networkservicemesh/sdk-kernel v0.0.0-20210511142657-bdd89bd6ec9e
 	github.com/open-policy-agent/opa v0.28.0 // indirect
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
