@@ -6,10 +6,9 @@ require (
 	github.com/antonfisher/nested-logrus-formatter v1.3.0
 	github.com/bytecodealliance/wasmtime-go v0.26.1 // indirect
 	github.com/edwarnicke/grpcfd v0.1.0
-	github.com/golang/protobuf v1.5.2
 	github.com/kelseyhightower/envconfig v1.4.0
-	github.com/networkservicemesh/api v0.0.0-20210523193133-30a6f075c760
-	github.com/networkservicemesh/sdk v0.0.0-20210523200103-fb932168d1b8
+	github.com/networkservicemesh/api v0.0.0-20210527182901-ea452d7e044c
+	github.com/networkservicemesh/sdk v0.0.0-20210531072719-eaf26022ad56
 	github.com/networkservicemesh/sdk-kernel v0.0.0-20210511142657-bdd89bd6ec9e
 	github.com/open-policy-agent/opa v0.28.0 // indirect
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
