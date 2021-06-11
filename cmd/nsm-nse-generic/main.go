@@ -39,6 +39,7 @@ import (
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/kernel"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/recvfd"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/sendfd"
+	"github.com/networkservicemesh/sdk/pkg/networkservice/core/chain"
 	registryclient "github.com/networkservicemesh/sdk/pkg/registry/chains/client"
 	"github.com/networkservicemesh/sdk/pkg/tools/debug"
 	"github.com/networkservicemesh/sdk/pkg/tools/grpcutils"
@@ -156,18 +157,24 @@ func main() {
 	log.FromContext(ctx).Infof("executing phase 3: parsing network prefixes for ipam")
 	// ********************************************************************************
 
-	s := []*net.IPNet{}
-	_, ipnet, err := net.ParseCIDR(config.CidrPrefix)
+	_, ipNet1, err := net.ParseCIDR(config.CidrPrefix)
 	if err != nil {
 		logrus.Fatalf("Could not parse cidr %s; %+v", config.CidrPrefix, err)
 	}
-	s = append(s, ipnet)
+
+	var ipamChain networkservice.NetworkServiceServer
+
 	if config.Ipv6Prefix != "" {
-		_, ip6net, err := net.ParseCIDR(config.Ipv6Prefix)
+		_, ipNet2, err := net.ParseCIDR(config.Ipv6Prefix)
 		if err != nil {
 			log.FromContext(ctx).Fatalf("error parsing cidr: %+v", err)
 		}
-		s = append(s, ip6net)
+		ipamChain = chain.NewNetworkServiceServer(
+			point2multipointipam.NewServer(ipNet1),
+			point2multipointipam.NewServer(ipNet2),
+		)
+	} else {
+		ipamChain = chain.NewNetworkServiceServer(point2multipointipam.NewServer(ipNet1))
 	}
 	// ********************************************************************************
 	logger.Infof("executing phase 4: create network service endpoint")
@@ -177,7 +184,7 @@ func main() {
 		endpoint.WithName(config.Name),
 		endpoint.WithAuthorizeServer(authorize.NewServer()),
 		endpoint.WithAdditionalFunctionality(
-			point2multipointipam.NewServer(s...),
+			ipamChain,
 			recvfd.NewServer(),
 			mechanisms.NewServer(map[string]networkservice.NetworkServiceServer{
 				kernelmech.MECHANISM: kernel.NewServer(),

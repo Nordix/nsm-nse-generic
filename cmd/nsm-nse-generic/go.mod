@@ -7,8 +7,8 @@ require (
 	github.com/bytecodealliance/wasmtime-go v0.26.1 // indirect
 	github.com/edwarnicke/grpcfd v0.1.0
 	github.com/kelseyhightower/envconfig v1.4.0
-	github.com/networkservicemesh/api v0.0.0-20210527182901-ea452d7e044c
-	github.com/networkservicemesh/sdk v0.0.0-20210531072719-eaf26022ad56
+	github.com/networkservicemesh/api v0.0.0-20210609080649-aa4a0cc6c9ea
+	github.com/networkservicemesh/sdk v0.0.0-20210609081227-4199f461084e
 	github.com/networkservicemesh/sdk-kernel v0.0.0-20210511142657-bdd89bd6ec9e
 	github.com/open-policy-agent/opa v0.28.0 // indirect
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
@@ -19,10 +19,7 @@ require (
 	github.com/stretchr/objx v0.2.0 // indirect
 	github.com/uber/jaeger-client-go v2.28.0+incompatible // indirect
 	github.com/uber/jaeger-lib v2.4.1+incompatible // indirect
-	golang.org/x/crypto v0.0.0-20210506145944-38f3c27a63bf // indirect
 	golang.org/x/exp v0.0.0-20200224162631-6cc2880d07d6 // indirect
-	golang.org/x/net v0.0.0-20210505214959-0714010a04ed // indirect
-	golang.org/x/sys v0.0.0-20210507014357-30e306a8bba5 // indirect
 	google.golang.org/genproto v0.0.0-20210506142907-4a47615972c2 // indirect
 	google.golang.org/grpc v1.37.0
 	gopkg.in/square/go-jose.v2 v2.5.1 // indirect
