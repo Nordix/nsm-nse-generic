@@ -7,8 +7,8 @@ require (
 	github.com/bytecodealliance/wasmtime-go v0.26.1 // indirect
 	github.com/edwarnicke/grpcfd v0.1.0
 	github.com/kelseyhightower/envconfig v1.4.0
-	github.com/networkservicemesh/api v0.0.0-20210609080649-aa4a0cc6c9ea
-	github.com/networkservicemesh/sdk v0.0.0-20210609081227-4199f461084e
+	github.com/networkservicemesh/api v1.0.1-0.20210907194827-9a36433d7d6e
+	github.com/networkservicemesh/sdk v0.5.1-0.20210914140353-07ced33cad48
 	github.com/networkservicemesh/sdk-kernel v0.0.0-20210511142657-bdd89bd6ec9e
 	github.com/open-policy-agent/opa v0.28.0 // indirect
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
