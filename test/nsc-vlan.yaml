@@ -2,48 +2,49 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: nse
+  name: nsc
   labels:
-    app: nse
+    app: nsc
 spec:
   selector:
     matchLabels:
-      app: nse
+      app: nsc
+  replicas: 2
   template:
     metadata:
       labels:
-        app: nse
+        app: nsc
     spec:
-      nodeSelector:
-        kubernetes.io/hostname: vm-003
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - nsc
+            topologyKey: "kubernetes.io/hostname"
       containers:
-        - name: nse
-          image: registry.nordix.org/cloud-native/nsm/nse-generic:latest
+        - name: nsc
+          image: ghcr.io/networkservicemesh/ci/cmd-nsc:e6e8fc0
           imagePullPolicy: IfNotPresent
           env:
             - name: SPIFFE_ENDPOINT_SOCKET
               value: unix:///run/spire/sockets/agent.sock
-            - name: NSE_NAME
+            - name: NSM_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: NSE_CONNECT_TO
-              value: unix:///var/lib/networkservicemesh/nsm.io.sock
-            - name: NSE_CALLOUT
-              value: /bin/nse.sh
-            - name: NSE_SERVICE_NAME
-              value: "icmp-responder"
-            - name: NSE_CIDR_PREFIX
-              value: "169.254.0.0/24"
-            - name: NSE_POINT2POINT
-              value: "True"
+            - name: NSM_NETWORK_SERVICES
+              value: kernel://finance-bridge/nsm-1
           volumeMounts:
             - name: spire-agent-socket
               mountPath: /run/spire/sockets
               readOnly: true
             - name: nsm-socket
               mountPath: /var/lib/networkservicemesh
-              readOnly: false
+              readOnly: true
       volumes:
         - name: spire-agent-socket
           hostPath:
