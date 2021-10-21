@@ -30,18 +30,14 @@ spec:
                   fieldPath: metadata.name
             - name: NSM_CONNECT_TO
               value: "nsm-registry-svc:5002"
-            - name: NSM_SERVICE_NAMES
-              value: "finance-bridge"
+            - name: NSM_SERVICES
+              value: "finance-bridge@service-domain.2: { vlan: 100 }"
             - name: NSM_CIDR_PREFIX
               value: "172.10.0.0/24"
             - name: NSM_IPV6_PREFIX
               value: "100:200::/64"
             - name: NSM_POINT2POINT
               value: "False"
-            - name: NSM_VLAN_BASE_IFNAME
-              value: "eth2"
-            - name: NSM_VLAN_ID
-              value: "100"
             - name: NSM_REGISTER_SERVICE
               value: "True"
             - name: NSM_LISTEN_ON

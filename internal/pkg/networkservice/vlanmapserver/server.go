@@ -19,44 +19,60 @@ package vlanmapserver
 
 import (
 	"context"
-	"net/url"
 
 	"github.com/golang/protobuf/ptypes/empty"
+	"github.com/pkg/errors"
+
 	"github.com/networkservicemesh/api/pkg/api/networkservice"
 	"github.com/networkservicemesh/api/pkg/api/networkservice/mechanisms/vlan"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/core/next"
+
+	"github.com/Nordix/nsm-nse-generic/internal/pkg/config"
 )
 
 const (
-	netNSFilename = "/proc/thread-self/ns/net"
+	netNSFilename      = "/proc/thread-self/ns/net"
+	serviceDomainLabel = "serviceDomain"
 )
 
 // TODO: add support for multiple services
 type vlanMapServer struct {
-	baseInterface string
-	vlanTag       int32
+	entries map[string]*entry
+}
+type entry struct {
+	vlanTag int32
+	domain  string
 }
 
 // NewServer - creates a NetworkServiceServer that requests a vlan interface and populates the netns inode
-func NewServer(baseInterface string, vlanID int32) networkservice.NetworkServiceServer {
+func NewServer(cfg *config.Config) networkservice.NetworkServiceServer {
 	v := &vlanMapServer{
-		baseInterface: baseInterface,
-		vlanTag:       vlanID,
+		entries: make(map[string]*entry, len(cfg.Services)),
+	}
+
+	for i := range cfg.Services {
+		service := &cfg.Services[i]
+		v.entries[service.Name] = &entry{
+			vlanTag: service.VLANTag,
+			domain:  service.Domain,
+		}
 	}
 	return v
 }
 
 func (v *vlanMapServer) Request(ctx context.Context, request *networkservice.NetworkServiceRequest) (*networkservice.Connection, error) {
+	conn := request.GetConnection()
+	entry, ok := v.entries[conn.GetNetworkService()]
 
-	if conn := request.GetConnection(); conn != nil {
-		if mechanism := vlan.ToMechanism(conn.GetMechanism()); mechanism != nil {
-			mechanism.SetNetNSURL((&url.URL{Scheme: "file", Path: netNSFilename}).String())
-			mechanism.SetVlanID(uint32(v.vlanTag))
-			mechanism.SetBaseInterfaceName(v.baseInterface)
-		}
+	if !ok {
+		return nil, errors.Errorf("network service is not supported: %s", conn.GetNetworkService())
 	}
-	if request.GetConnection() == nil {
-		request.Connection = &networkservice.Connection{}
+
+	if mechanism := vlan.ToMechanism(conn.GetMechanism()); mechanism != nil {
+		mechanism.SetVlanID(uint32(entry.vlanTag))
+
+		conn.Labels = make(map[string]string, 1)
+		conn.Labels[serviceDomainLabel] = entry.domain
 	}
 	if request.GetConnection().GetContext() == nil {
 		request.GetConnection().Context = &networkservice.ConnectionContext{}
