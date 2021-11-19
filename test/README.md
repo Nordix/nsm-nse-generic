@@ -12,12 +12,14 @@ Make sure that you have completed steps from [basic](deployments-k8s/examples/ba
 ## Run
 
 Create test namespace:
+
 ```bash
 NAMESPACE=($(kubectl create -f https://raw.githubusercontent.com/networkservicemesh/deployments-k8s/9f03e7dfa191a20ce481b6af789ccfc26865ab78/examples/use-cases/namespace.yaml)[0])
 NAMESPACE=${NAMESPACE:10}
 ```
 
 Create customization file:
+
 ```bash
 cat > kustomization.yaml <<EOF
 ---

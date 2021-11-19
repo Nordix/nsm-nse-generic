@@ -37,6 +37,7 @@ import (
 
 	"github.com/networkservicemesh/api/pkg/api/networkservice"
 	vlanmech "github.com/networkservicemesh/api/pkg/api/networkservice/mechanisms/vlan"
+	"github.com/networkservicemesh/api/pkg/api/networkservice/payload"
 	registryapi "github.com/networkservicemesh/api/pkg/api/registry"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/chains/endpoint"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/authorize"
@@ -201,7 +202,7 @@ func main() {
 		nsRegistryClient := registryclient.NewNetworkServiceRegistryClient(ctx, &cfg.ConnectTo, registryclient.WithDialOptions(clientOptions...))
 		for i := range cfg.Services {
 			nsName := cfg.Services[i].Name
-			nsPayload := cfg.Services[i].Payload
+			nsPayload := payload.Ethernet
 			if _, err = nsRegistryClient.Register(ctx, &registryapi.NetworkService{
 				Name:    nsName,
 				Payload: nsPayload,

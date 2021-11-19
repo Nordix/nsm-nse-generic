@@ -21,31 +21,28 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/networkservicemesh/api/pkg/api/networkservice/payload"
-
 	"github.com/Nordix/nsm-nse-generic/internal/pkg/config"
 )
 
 func TestServiceConfig_UnmarshalBinary(t *testing.T) {
 	cfg := new(config.ServiceConfig)
 
-	err := cfg.UnmarshalBinary([]byte("finance-bridge@service-domain.2: { vlan: 100 }"))
+	err := cfg.UnmarshalBinary([]byte("finance-bridge { domain: service-domain.2; vlan: 100; via: gw-1 }"))
 	require.NoError(t, err)
 
 	require.Equal(t, &config.ServiceConfig{
 		Name:    "finance-bridge",
 		Domain:  "service-domain.2",
-		Payload: payload.Ethernet,
+		Via:     "gw-1",
 		VLANTag: 100,
 	}, cfg)
 
-	err = cfg.UnmarshalBinary([]byte("finance-bridge@service-domain.1: { vlan: 200; payload: IP }"))
+	err = cfg.UnmarshalBinary([]byte("finance-bridge { vlan: 200; via: service-domain.1 }"))
 	require.NoError(t, err)
 
 	require.Equal(t, &config.ServiceConfig{
 		Name:    "finance-bridge",
-		Domain:  "service-domain.1",
-		Payload: payload.IP,
+		Via:     "service-domain.1",
 		VLANTag: 200,
 	}, cfg)
 }

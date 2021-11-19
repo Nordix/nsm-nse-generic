@@ -31,8 +31,8 @@ import (
 )
 
 const (
-	netNSFilename      = "/proc/thread-self/ns/net"
-	serviceDomainLabel = "serviceDomain"
+	netNSFilename = "/proc/thread-self/ns/net"
+	viaLabel      = "via"
 )
 
 // TODO: add support for multiple services
@@ -41,7 +41,7 @@ type vlanMapServer struct {
 }
 type entry struct {
 	vlanTag int32
-	domain  string
+	via     string
 }
 
 // NewServer - creates a NetworkServiceServer that requests a vlan interface and populates the netns inode
@@ -54,7 +54,7 @@ func NewServer(cfg *config.Config) networkservice.NetworkServiceServer {
 		service := &cfg.Services[i]
 		v.entries[service.Name] = &entry{
 			vlanTag: service.VLANTag,
-			domain:  service.Domain,
+			via:     service.Via,
 		}
 	}
 	return v
@@ -72,7 +72,7 @@ func (v *vlanMapServer) Request(ctx context.Context, request *networkservice.Net
 		mechanism.SetVlanID(uint32(entry.vlanTag))
 
 		conn.Labels = make(map[string]string, 1)
-		conn.Labels[serviceDomainLabel] = entry.domain
+		conn.Labels[viaLabel] = entry.via
 	}
 	if request.GetConnection().GetContext() == nil {
 		request.GetConnection().Context = &networkservice.ConnectionContext{}

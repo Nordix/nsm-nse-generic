@@ -25,14 +25,13 @@ import (
 
 	"github.com/kelseyhightower/envconfig"
 	"github.com/pkg/errors"
-
-	"github.com/networkservicemesh/api/pkg/api/networkservice/payload"
 )
 
 const (
-	vlanPrefix    = "vlan:"
-	labelsPrefix  = "labels:"
-	payloadPrefix = "payload:"
+	vlanPrefix   = "vlan:"
+	labelsPrefix = "labels:"
+	viaPrefix    = "via:"
+	domainPrefix = "domain:"
 
 	tcpSchema = "tcp"
 )
@@ -74,36 +73,29 @@ func validateConfig(cfg *Config) error {
 type ServiceConfig struct {
 	Name    string
 	Domain  string
-	Payload string
+	Via     string
 	VLANTag int32
 	Labels  map[string]string
 }
 
+func (s *ServiceConfig) InitValues() {
+	s.Domain = ""
+	s.VLANTag = 0
+	s.Via = ""
+}
+
 // UnmarshalBinary expects string(bytes) to be in format:
-// Name@Domain: { addr: MACAddr; vlan: VLANTag; labels: Labels; payload: Payload; }
-// MACAddr = xx:xx:xx:xx:xx:xx
+// Name { domain: Domain; vlan: VLANTag; labels: Labels; via: Via; }
 // Labels = label_1=value_1&label_2=value_2
 func (s *ServiceConfig) UnmarshalBinary(bytes []byte) (err error) {
 	text := string(bytes)
 
-	split := strings.Split(text, "@")
+	split := strings.Split(text, "{")
+	if len(split) < 2 {
+		return errors.Errorf("invalid format: %s", text)
+	}
 	s.Name = strings.TrimSpace(split[0])
-
-	if len(split) < 2 {
-		return errors.Errorf("invalid format: %s", text)
-	}
-
-	split = strings.Split(split[1], ":")
-	s.Domain = strings.TrimSpace(split[0])
-
-	split = strings.Split(text, "{")
-	if len(split) < 2 {
-		return errors.Errorf("invalid format: %s", text)
-	}
-
-	// Set default Payload
-	s.Payload = payload.Ethernet
-
+	s.InitValues()
 	split = strings.Split(split[1], "}")
 	for _, part := range strings.Split(split[0], ";") {
 		part = strings.TrimSpace(part)
@@ -112,8 +104,10 @@ func (s *ServiceConfig) UnmarshalBinary(bytes []byte) (err error) {
 			s.VLANTag, err = parseInt32(trimPrefix(part, vlanPrefix))
 		case strings.HasPrefix(part, labelsPrefix):
 			s.Labels, err = parseMap(trimPrefix(part, labelsPrefix))
-		case strings.HasPrefix(part, payloadPrefix):
-			s.Payload = trimPrefix(part, payloadPrefix)
+		case strings.HasPrefix(part, viaPrefix):
+			s.Via = trimPrefix(part, viaPrefix)
+		case strings.HasPrefix(part, domainPrefix):
+			s.Domain = trimPrefix(part, domainPrefix)
 		default:
 			err = errors.Errorf("invalid format: %s", text)
 		}
@@ -153,8 +147,8 @@ func (s *ServiceConfig) validate() error {
 	if s.Name == "" {
 		return errors.New("name is empty")
 	}
-	if s.Domain == "" {
-		return errors.New("domain is empty")
+	if s.Via == "" {
+		return errors.New("via is empty")
 	}
 	if s.VLANTag < 0 || s.VLANTag > 4095 {
 		return errors.New("Invalid VLAN ID")

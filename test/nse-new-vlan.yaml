@@ -31,7 +31,7 @@ spec:
             - name: NSM_CONNECT_TO
               value: "nsm-registry-svc:5002"
             - name: NSM_SERVICES
-              value: "finance-bridge@service-domain.2: { vlan: 100 }"
+              value: "finance-bridge { vlan: 100; via: service.domain.2}"
             - name: NSM_CIDR_PREFIX
               value: "172.10.0.0/24"
             - name: NSM_IPV6_PREFIX
