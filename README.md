@@ -2,9 +2,10 @@
 
 This repo contains 'nse-vlan' an NSE application for Network Service Mesh. It provides ipam and vlan configuration context for registered Network Services.
 
-# Usage
+## Usage
 
 `nse-vlan` accept following environment variables:
+
 * NSM_NAME                  Name of the endpoint
 * NSM_CONNECT_TO            An URL of registry service to connect to
 * NSM_MAX_TOKEN_LIFETIME    Maximum lifetime of tokens
@@ -14,10 +15,9 @@ This repo contains 'nse-vlan' an NSE application for Network Service Mesh. It pr
 * NSM_LISTEN_ON             tcp:// url to be listen on. It will be used as public to register NSM
 * NSM_SERVICES              List of supported services
 
+## Build
 
-# Build
-
-## Build cmd binary locally
+### Build cmd binary locally
 
 You can build the locally by executing
 
@@ -25,7 +25,7 @@ You can build the locally by executing
 go build ./...
 ```
 
-## Build Docker container
+### Build Docker container
 
 You can build the docker container by running:
 
